@@ -1,4 +1,5 @@
 import importlib
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from pydantic import ValidationError
 
 from core.rag.models.document import Document
+from models.dataset import Dataset
 
 
 def _build_fake_pymilvus_modules():
@@ -161,6 +163,35 @@ def test_init_client_supports_token_and_user_password(milvus_module):
     assert user_client.init_kwargs["uri"] == "http://localhost:19530"
     assert user_client.init_kwargs["user"] == "root"
     assert user_client.init_kwargs["password"] == "Milvus"
+
+
+def test_init_client_passes_tls_kwargs_when_secure(milvus_module):
+    vector = milvus_module.MilvusVector.__new__(milvus_module.MilvusVector)
+    client = vector._init_client(
+        milvus_module.MilvusConfig.model_validate(
+            {
+                "uri": "https://milvus.example.com:19530",
+                "token": "abc",
+                "database": "db",
+                "secure": True,
+                "server_pem_path": "/etc/milvus/certs/server.pem",
+                "server_name": "milvus.example.com",
+            }
+        )
+    )
+    assert client.init_kwargs["secure"] is True
+    assert client.init_kwargs["server_pem_path"] == "/etc/milvus/certs/server.pem"
+    assert client.init_kwargs["server_name"] == "milvus.example.com"
+
+
+def test_init_client_omits_tls_kwargs_when_not_secure(milvus_module):
+    vector = milvus_module.MilvusVector.__new__(milvus_module.MilvusVector)
+    client = vector._init_client(
+        milvus_module.MilvusConfig.model_validate({"uri": "http://localhost:19530", "token": "abc", "database": "db"})
+    )
+    assert "secure" not in client.init_kwargs
+    assert "server_pem_path" not in client.init_kwargs
+    assert "server_name" not in client.init_kwargs
 
 
 def test_init_loads_fields_when_collection_exists(milvus_module):
@@ -387,12 +418,10 @@ def test_create_collection_builds_schema_and_indexes(milvus_module, monkeypatch:
 
 def test_factory_initializes_milvus_vector(milvus_module, monkeypatch: pytest.MonkeyPatch):
     factory = milvus_module.MilvusVectorFactory()
-    dataset_with_index = SimpleNamespace(
-        id="dataset-1",
-        index_struct_dict={"vector_store": {"class_prefix": "EXISTING_COLLECTION"}},
-        index_struct=None,
+    dataset_with_index = Dataset(
+        id="dataset-1", index_struct=json.dumps({"vector_store": {"class_prefix": "EXISTING_COLLECTION"}})
     )
-    dataset_without_index = SimpleNamespace(id="dataset-2", index_struct_dict=None, index_struct=None)
+    dataset_without_index = Dataset(id="dataset-2")
 
     monkeypatch.setattr(milvus_module.Dataset, "gen_collection_name_by_id", lambda _id: "AUTO_COLLECTION")
     monkeypatch.setattr(milvus_module.dify_config, "MILVUS_URI", "http://localhost:19530")

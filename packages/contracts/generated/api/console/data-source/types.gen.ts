@@ -4,10 +4,6 @@ export type ClientOptions = {
   baseUrl: `${string}://${string}/console/api` | (string & {})
 }
 
-export type SimpleResultResponse = {
-  result: string
-}
-
 export type GetDataSourceIntegratesData = {
   body?: never
   path?: never
@@ -21,8 +17,8 @@ export type GetDataSourceIntegratesResponses = {
   }
 }
 
-export type GetDataSourceIntegratesResponse
-  = GetDataSourceIntegratesResponses[keyof GetDataSourceIntegratesResponses]
+export type GetDataSourceIntegratesResponse =
+  GetDataSourceIntegratesResponses[keyof GetDataSourceIntegratesResponses]
 
 export type PatchDataSourceIntegratesData = {
   body?: never
@@ -32,11 +28,13 @@ export type PatchDataSourceIntegratesData = {
 }
 
 export type PatchDataSourceIntegratesResponses = {
-  200: SimpleResultResponse
+  200: {
+    [key: string]: unknown
+  }
 }
 
-export type PatchDataSourceIntegratesResponse
-  = PatchDataSourceIntegratesResponses[keyof PatchDataSourceIntegratesResponses]
+export type PatchDataSourceIntegratesResponse =
+  PatchDataSourceIntegratesResponses[keyof PatchDataSourceIntegratesResponses]
 
 export type GetDataSourceIntegratesByBindingIdByActionData = {
   body?: never
@@ -54,8 +52,8 @@ export type GetDataSourceIntegratesByBindingIdByActionResponses = {
   }
 }
 
-export type GetDataSourceIntegratesByBindingIdByActionResponse
-  = GetDataSourceIntegratesByBindingIdByActionResponses[keyof GetDataSourceIntegratesByBindingIdByActionResponses]
+export type GetDataSourceIntegratesByBindingIdByActionResponse =
+  GetDataSourceIntegratesByBindingIdByActionResponses[keyof GetDataSourceIntegratesByBindingIdByActionResponses]
 
 export type PatchDataSourceIntegratesByBindingIdByActionData = {
   body?: never
@@ -68,8 +66,10 @@ export type PatchDataSourceIntegratesByBindingIdByActionData = {
 }
 
 export type PatchDataSourceIntegratesByBindingIdByActionResponses = {
-  200: SimpleResultResponse
+  200: {
+    [key: string]: unknown
+  }
 }
 
-export type PatchDataSourceIntegratesByBindingIdByActionResponse
-  = PatchDataSourceIntegratesByBindingIdByActionResponses[keyof PatchDataSourceIntegratesByBindingIdByActionResponses]
+export type PatchDataSourceIntegratesByBindingIdByActionResponse =
+  PatchDataSourceIntegratesByBindingIdByActionResponses[keyof PatchDataSourceIntegratesByBindingIdByActionResponses]

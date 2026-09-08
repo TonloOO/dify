@@ -14,6 +14,7 @@ export type FeatureModel = {
   docs_processing: string
   documents_upload_quota: LimitationModel
   education: EducationModel
+  enable_skill: boolean
   human_input_email_delivery_enabled: boolean
   is_allow_transfer_workspace: boolean
   knowledge_pipeline: KnowledgePipeline
@@ -22,9 +23,15 @@ export type FeatureModel = {
   model_load_balancing_enabled: boolean
   next_credit_reset_date: number
   trigger_event: Quota
-  vector_space: LimitationModel
+  vector_space: LimitationModel | null
   webapp_copyright_enabled: boolean
   workspace_members: LicenseLimitationModel
+}
+
+export type VectorSpaceLimitationModel = {
+  limit: number
+  size: number
+  usage_unknown?: boolean
 }
 
 export type LimitationModel = {
@@ -39,7 +46,6 @@ export type Quota = {
 }
 
 export type BillingModel = {
-  enabled: boolean
   subscription: SubscriptionModel
 }
 
@@ -60,8 +66,10 @@ export type LicenseLimitationModel = {
 
 export type SubscriptionModel = {
   interval: string
-  plan: string
+  plan: CloudPlan
 }
+
+export type CloudPlan = 'professional' | 'sandbox' | 'team'
 
 export type GetFeaturesData = {
   body?: never
@@ -75,3 +83,17 @@ export type GetFeaturesResponses = {
 }
 
 export type GetFeaturesResponse = GetFeaturesResponses[keyof GetFeaturesResponses]
+
+export type GetFeaturesVectorSpaceData = {
+  body?: never
+  path?: never
+  query?: never
+  url: '/features/vector-space'
+}
+
+export type GetFeaturesVectorSpaceResponses = {
+  200: VectorSpaceLimitationModel
+}
+
+export type GetFeaturesVectorSpaceResponse =
+  GetFeaturesVectorSpaceResponses[keyof GetFeaturesVectorSpaceResponses]

@@ -1,14 +1,16 @@
-/* eslint-disable ts/no-explicit-any */
 import type { ComponentProps } from 'react'
-import type { Mock } from 'vitest'
+import type { Mock } from 'vite-plus/test'
 import type { AnnotationItemBasic } from '../../type'
 import type { Locale } from '@/i18n-config'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useLocale } from '@/context/i18n'
 import { LanguagesSupported } from '@/i18n-config/language'
 import { clearAllAnnotations, fetchExportAnnotationList } from '@/service/annotation'
+import { renderWithConsoleQuery as render } from '@/test/console/query-data'
 import HeaderOptions from '../index'
+
+/* oxlint-disable typescript/no-explicit-any */
 
 const mockJsonToCSV = vi.fn((_: unknown) => 'csv-content')
 const mockCSVDownloader = vi.fn(({ children }) => <>{children}</>)
@@ -32,7 +34,6 @@ vi.mock('@/context/provider-context', () => ({
       usage: { annotatedResponse: 0 },
       total: { annotatedResponse: 10 },
     },
-    enableBilling: false,
   }),
 }))
 
@@ -70,7 +71,9 @@ const openOperationsPopover = async (user: ReturnType<typeof userEvent.setup>) =
 
 const expandExportMenu = async (user: ReturnType<typeof userEvent.setup>) => {
   await openOperationsPopover(user)
-  const exportItem = await screen.findByRole('menuitem', { name: /appAnnotation\.table\.header\.bulkExport/i })
+  const exportItem = await screen.findByRole('menuitem', {
+    name: /appAnnotation\.table\.header\.bulkExport/i,
+  })
   await user.hover(exportItem)
 }
 
@@ -146,18 +149,17 @@ describe('HeaderOptions', () => {
     const originalCreateElement = document.createElement.bind(document)
     const anchor = originalCreateElement('a') as HTMLAnchorElement
     const clickSpy = vi.spyOn(anchor, 'click').mockImplementation(vi.fn())
-    const createElementSpy = vi.spyOn(document, 'createElement')
+    const createElementSpy = vi
+      .spyOn(document, 'createElement')
       .mockImplementation((tagName: Parameters<Document['createElement']>[0]) => {
-        if (tagName === 'a')
-          return anchor
+        if (tagName === 'a') return anchor
         return originalCreateElement(tagName)
       })
     let capturedBlob: Blob | null = null
-    const objectURLSpy = vi.spyOn(URL, 'createObjectURL')
-      .mockImplementation((blob) => {
-        capturedBlob = blob as Blob
-        return 'blob://mock-url'
-      })
+    const objectURLSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      capturedBlob = blob as Blob
+      return 'blob://mock-url'
+    })
     const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(vi.fn())
 
     renderComponent({}, LanguagesSupported[1])
@@ -242,9 +244,7 @@ describe('HeaderOptions', () => {
     await clickOperationAction('appAnnotation.table.header.bulkImport')
 
     expect(await screen.findByText('appAnnotation.batchModal.title'))!.toBeInTheDocument()
-    await user.click(
-      screen.getByRole('button', { name: 'appAnnotation.batchModal.cancel' }),
-    )
+    await user.click(screen.getByRole('button', { name: 'appAnnotation.batchModal.cancel' }))
     expect(onAdded).not.toHaveBeenCalled()
   })
 
@@ -254,18 +254,17 @@ describe('HeaderOptions', () => {
     const originalCreateElement = document.createElement.bind(document)
     const anchor = originalCreateElement('a') as HTMLAnchorElement
     const clickSpy = vi.spyOn(anchor, 'click').mockImplementation(vi.fn())
-    const createElementSpy = vi.spyOn(document, 'createElement')
+    const createElementSpy = vi
+      .spyOn(document, 'createElement')
       .mockImplementation((tagName: Parameters<Document['createElement']>[0]) => {
-        if (tagName === 'a')
-          return anchor
+        if (tagName === 'a') return anchor
         return originalCreateElement(tagName)
       })
     let capturedBlob: Blob | null = null
-    const objectURLSpy = vi.spyOn(URL, 'createObjectURL')
-      .mockImplementation((blob) => {
-        capturedBlob = blob as Blob
-        return 'blob://mock-url'
-      })
+    const objectURLSpy = vi.spyOn(URL, 'createObjectURL').mockImplementation((blob) => {
+      capturedBlob = blob as Blob
+      return 'blob://mock-url'
+    })
     const revokeSpy = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(vi.fn())
 
     renderComponent({}, LanguagesSupported[1])
@@ -352,12 +351,7 @@ describe('HeaderOptions', () => {
     await waitFor(() => expect(mockedFetchAnnotations).toHaveBeenCalledTimes(1))
 
     view.rerender(
-      <HeaderOptions
-        appId="test-app-id"
-        onAdd={vi.fn()}
-        onAdded={vi.fn()}
-        controlUpdateList={1}
-      />,
+      <HeaderOptions appId="test-app-id" onAdd={vi.fn()} onAdded={vi.fn()} controlUpdateList={1} />,
     )
 
     await waitFor(() => expect(mockedFetchAnnotations).toHaveBeenCalledTimes(2))

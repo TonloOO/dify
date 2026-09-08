@@ -3,12 +3,14 @@ from collections.abc import Mapping
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
+from sqlalchemy.orm import Session
 from yarl import URL
 
 from configs import dify_config
 from core.helper.provider_cache import ToolProviderCredentialsCache
 from core.mcp.types import Tool as MCPTool
 from core.plugin.entities.plugin_daemon import CredentialType, PluginDatasourceProviderEntity
+from core.plugin.plugin_service import PluginService
 from core.tools.__base.tool import Tool
 from core.tools.__base.tool_runtime import ToolRuntime
 from core.tools.builtin_tool.provider import BuiltinToolProviderController
@@ -26,8 +28,8 @@ from core.tools.plugin_tool.provider import PluginToolProviderController
 from core.tools.utils.encryption import create_provider_encrypter, create_tool_provider_encrypter
 from core.tools.workflow_as_tool.provider import WorkflowToolProviderController
 from core.tools.workflow_as_tool.tool import WorkflowTool
+from extensions.ext_database import db
 from models.tools import ApiToolProvider, BuiltinToolProvider, MCPToolProvider, WorkflowToolProvider
-from services.plugin.plugin_service import PluginService
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +204,7 @@ class ToolTransformService:
         controller = ApiToolProviderController.from_db(
             db_provider=db_provider,
             auth_type=auth_type,
+            session=db.session(),
         )
 
         return controller
@@ -305,15 +308,17 @@ class ToolTransformService:
         db_provider: ApiToolProvider,
         decrypt_credentials: bool = True,
         labels: list[str] | None = None,
+        *,
+        session: Session,
     ) -> ToolProviderApiEntity:
         """
         convert provider controller to user provider
         """
         username = "Anonymous"
-        if db_provider.user is None:
+        user = db_provider.user(session=session)
+        if user is None:
             raise ValueError(f"user is None for api provider {db_provider.id}")
         try:
-            user = db_provider.user
             if not user:
                 raise ValueError("user not found")
 
@@ -456,16 +461,17 @@ class ToolTransformService:
             if depth >= ToolTransformService._MCP_SCHEMA_TYPE_RESOLUTION_MAX_DEPTH:
                 return "string"
             prop_type = prop.get("type")
-            if isinstance(prop_type, list):
-                non_null_types = [type_name for type_name in prop_type if type_name != "null"]
-                if non_null_types:
-                    return non_null_types[0]
-                if prop_type:
-                    return "string"
-            elif isinstance(prop_type, str):
-                if prop_type == "null":
-                    return "string"
-                return prop_type
+            match prop_type:
+                case list():
+                    non_null_types = [type_name for type_name in prop_type if type_name != "null"]
+                    if non_null_types:
+                        return non_null_types[0]
+                    if prop_type:
+                        return "string"
+                case str():
+                    if prop_type == "null":
+                        return "string"
+                    return prop_type
 
             for union_key in ("anyOf", "oneOf"):
                 union_schemas = prop.get(union_key)

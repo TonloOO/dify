@@ -1,5 +1,4 @@
 import base64
-import enum
 import hashlib
 import hmac
 import json
@@ -8,14 +7,15 @@ import os
 import pickle
 import re
 import time
+from collections.abc import Sequence
 from datetime import datetime
 from json import JSONDecodeError
-from typing import Any, ClassVar, TypedDict, cast
+from typing import Any, ClassVar, TypedDict, cast, override
 from uuid import uuid4
 
 import sqlalchemy as sa
 from sqlalchemy import DateTime, String, func, select
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column, scoped_session
 
 from configs import dify_config
 from core.rag.entities import ParentMode, Rule
@@ -157,10 +157,10 @@ class DocumentDict(TypedDict):
     hit_count: int | None
 
 
-class DatasetPermissionEnum(enum.StrEnum):
-    ONLY_ME = "only_me"
-    ALL_TEAM = "all_team_members"
-    PARTIAL_TEAM = "partial_members"
+from models.enums import PermissionEnum
+
+# Backward-compatible alias — new code should import PermissionEnum from models.enums
+DatasetPermissionEnum = PermissionEnum
 
 
 class Dataset(Base):
@@ -168,6 +168,7 @@ class Dataset(Base):
     __table_args__ = (
         sa.PrimaryKeyConstraint("id", name="dataset_pkey"),
         sa.Index("dataset_tenant_idx", "tenant_id"),
+        sa.Index("dataset_tenant_maintainer_idx", "tenant_id", "maintainer"),
         adjusted_json_index("retrieval_model_idx", "retrieval_model"),
     )
 
@@ -189,6 +190,7 @@ class Dataset(Base):
     indexing_technique: Mapped[IndexTechniqueType | None] = mapped_column(EnumText(IndexTechniqueType, length=255))
     index_struct = mapped_column(LongText, nullable=True)
     created_by = mapped_column(StringUUID, nullable=False)
+    maintainer: Mapped[str | None] = mapped_column(StringUUID, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=func.current_timestamp())
     updated_by = mapped_column(StringUUID, nullable=True)
     updated_at = mapped_column(
@@ -200,24 +202,22 @@ class Dataset(Base):
     collection_binding_id = mapped_column(StringUUID, nullable=True)
     retrieval_model = mapped_column(AdjustedJSON, nullable=True)
     summary_index_setting = mapped_column(AdjustedJSON, nullable=True)
-    built_in_field_enabled = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"))
+    built_in_field_enabled = mapped_column(sa.Boolean, nullable=False, server_default=sa.false())
     icon_info = mapped_column(AdjustedJSON, nullable=True)
     runtime_mode = mapped_column(
         EnumText(DatasetRuntimeMode, length=255), nullable=True, server_default=sa.text("'general'")
     )
     pipeline_id = mapped_column(StringUUID, nullable=True)
     chunk_structure = mapped_column(sa.String(255), nullable=True)
-    enable_api = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("true"))
-    is_multimodal = mapped_column(sa.Boolean, default=False, nullable=False, server_default=db.text("false"))
+    enable_api = mapped_column(sa.Boolean, nullable=False, server_default=sa.true())
+    is_multimodal = mapped_column(sa.Boolean, default=False, nullable=False, server_default=sa.false())
 
-    @property
-    def total_documents(self):
-        return db.session.scalar(select(func.count(Document.id)).where(Document.dataset_id == self.id)) or 0
+    def get_total_documents(self, *, session: Session) -> int:
+        return self.get_document_count(session=session)
 
-    @property
-    def total_available_documents(self):
+    def get_total_available_documents(self, *, session: Session) -> int:
         return (
-            db.session.scalar(
+            session.scalar(
                 select(func.count(Document.id)).where(
                     Document.dataset_id == self.id,
                     Document.indexing_status == "completed",
@@ -228,9 +228,8 @@ class Dataset(Base):
             or 0
         )
 
-    @property
-    def dataset_keyword_table(self):
-        return db.session.scalar(select(DatasetKeywordTable).where(DatasetKeywordTable.dataset_id == self.id))
+    def get_dataset_keyword_table(self, *, session: Session) -> "DatasetKeywordTable | None":
+        return session.scalar(select(DatasetKeywordTable).where(DatasetKeywordTable.dataset_id == self.id))
 
     @property
     def index_struct_dict(self):
@@ -244,30 +243,26 @@ class Dataset(Base):
         }
         return self.retrieval_model or default_retrieval_model
 
-    @property
-    def created_by_account(self):
-        return db.session.get(Account, self.created_by)
+    def get_created_by_account(self, *, session: Session) -> Account | None:
+        return session.get(Account, self.created_by)
 
-    @property
-    def author_name(self) -> str | None:
-        account = db.session.get(Account, self.created_by)
+    def get_author_name(self, *, session: Session) -> str | None:
+        account = self.get_created_by_account(session=session)
         if account:
             return account.name
         return None
 
-    @property
-    def latest_process_rule(self):
-        return db.session.scalar(
+    def get_latest_process_rule(self, *, session: Session) -> "DatasetProcessRule | None":
+        return session.scalar(
             select(DatasetProcessRule)
             .where(DatasetProcessRule.dataset_id == self.id)
             .order_by(DatasetProcessRule.created_at.desc())
             .limit(1)
         )
 
-    @property
-    def app_count(self):
+    def get_app_count(self, *, session: Session) -> int:
         return (
-            db.session.scalar(
+            session.scalar(
                 select(func.count(AppDatasetJoin.id)).where(
                     AppDatasetJoin.dataset_id == self.id, App.id == AppDatasetJoin.app_id
                 )
@@ -275,14 +270,12 @@ class Dataset(Base):
             or 0
         )
 
-    @property
-    def document_count(self):
-        return db.session.scalar(select(func.count(Document.id)).where(Document.dataset_id == self.id)) or 0
+    def get_document_count(self, *, session: Session) -> int:
+        return session.scalar(select(func.count(Document.id)).where(Document.dataset_id == self.id)) or 0
 
-    @property
-    def available_document_count(self):
+    def get_available_document_count(self, *, session: Session) -> int:
         return (
-            db.session.scalar(
+            session.scalar(
                 select(func.count(Document.id)).where(
                     Document.dataset_id == self.id,
                     Document.indexing_status == "completed",
@@ -306,23 +299,31 @@ class Dataset(Base):
             or 0
         )
 
-    @property
-    def word_count(self):
-        return db.session.scalar(
-            select(func.coalesce(func.sum(Document.word_count), 0)).where(Document.dataset_id == self.id)
+    def get_word_count(self, *, session: Session) -> int:
+        return (
+            session.scalar(
+                select(func.coalesce(func.sum(Document.word_count), 0)).where(Document.dataset_id == self.id)
+            )
+            or 0
+        )
+
+    def get_doc_form(self, *, session: Session) -> str | None:
+        if self.chunk_structure:
+            return self.chunk_structure
+        return session.scalar(
+            select(Document.doc_form)
+            .where(Document.dataset_id == self.id, Document.tenant_id == self.tenant_id)
+            .limit(1)
         )
 
     @property
-    def doc_form(self) -> str | None:
-        if self.chunk_structure:
-            return self.chunk_structure
-        document = db.session.scalar(select(Document).where(Document.dataset_id == self.id).limit(1))
-        if document:
-            return document.doc_form
-        return None
-
-    @property
     def retrieval_model_dict(self):
+        """Return a normalized retrieval model payload for API responses.
+
+        Older rows may only persist a partial retrieval model dict. Merge the
+        stored value over the current defaults so response validation still sees
+        the required baseline fields.
+        """
         default_retrieval_model = {
             "search_method": RetrievalMethod.SEMANTIC_SEARCH,
             "reranking_enable": False,
@@ -330,11 +331,13 @@ class Dataset(Base):
             "top_k": 2,
             "score_threshold_enabled": False,
         }
-        return self.retrieval_model or default_retrieval_model
+        if not self.retrieval_model:
+            return default_retrieval_model
 
-    @property
-    def tags(self):
-        tags = db.session.scalars(
+        return {**default_retrieval_model, **self.retrieval_model}
+
+    def get_tags(self, *, session: Session) -> Sequence[Tag]:
+        tags = session.scalars(
             select(Tag)
             .join(TagBinding, Tag.id == TagBinding.tag_id)
             .where(
@@ -347,11 +350,10 @@ class Dataset(Base):
 
         return tags or []
 
-    @property
-    def external_knowledge_info(self):
+    def get_external_knowledge_info(self, *, session: Session) -> dict[str, Any] | None:
         if self.provider != "external":
             return None
-        external_knowledge_binding = db.session.scalar(
+        external_knowledge_binding = session.scalar(
             select(ExternalKnowledgeBindings).where(
                 ExternalKnowledgeBindings.dataset_id == self.id,
                 ExternalKnowledgeBindings.tenant_id == self.tenant_id,
@@ -359,7 +361,7 @@ class Dataset(Base):
         )
         if not external_knowledge_binding:
             return None
-        external_knowledge_api = db.session.scalar(
+        external_knowledge_api = session.scalar(
             select(ExternalKnowledgeApis).where(
                 ExternalKnowledgeApis.id == external_knowledge_binding.external_knowledge_api_id,
                 ExternalKnowledgeApis.tenant_id == self.tenant_id,
@@ -374,19 +376,15 @@ class Dataset(Base):
             "external_knowledge_api_endpoint": json.loads(external_knowledge_api.settings).get("endpoint", ""),
         }
 
-    @property
-    def is_published(self):
+    def get_is_published(self, *, session: Session) -> bool:
         if self.pipeline_id:
-            pipeline = db.session.scalar(select(Pipeline).where(Pipeline.id == self.pipeline_id))
+            pipeline = session.scalar(select(Pipeline).where(Pipeline.id == self.pipeline_id))
             if pipeline:
                 return pipeline.is_published
         return False
 
-    @property
-    def doc_metadata(self):
-        dataset_metadatas = db.session.scalars(
-            select(DatasetMetadata).where(DatasetMetadata.dataset_id == self.id)
-        ).all()
+    def get_doc_metadata(self, *, session: Session) -> list[dict[str, str]]:
+        dataset_metadatas = session.scalars(select(DatasetMetadata).where(DatasetMetadata.dataset_id == self.id)).all()
 
         doc_metadata = [
             {
@@ -529,7 +527,7 @@ class Document(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     # pause
-    is_paused: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True, server_default=sa.text("false"))
+    is_paused: Mapped[bool | None] = mapped_column(sa.Boolean, nullable=True, server_default=sa.false())
     paused_by = mapped_column(StringUUID, nullable=True)
     paused_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -541,10 +539,10 @@ class Document(Base):
     indexing_status = mapped_column(
         EnumText(IndexingStatus, length=255), nullable=False, server_default=sa.text("'waiting'")
     )
-    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("true"))
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.true())
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     disabled_by = mapped_column(StringUUID, nullable=True)
-    archived: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"))
+    archived: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false())
     archived_reason = mapped_column(String(255), nullable=True)
     archived_by = mapped_column(StringUUID, nullable=True)
     archived_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -557,7 +555,7 @@ class Document(Base):
         EnumText(IndexStructureType, length=255), nullable=False, server_default=sa.text("'text_model'")
     )
     doc_language = mapped_column(String(255), nullable=True)
-    need_summary: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"))
+    need_summary: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false())
 
     DATA_SOURCES = ["upload_file", "notion_import", "website_crawl"]
 
@@ -591,12 +589,11 @@ class Document(Base):
             return data_source_info_dict
         return {}
 
-    @property
-    def data_source_detail_dict(self) -> dict[str, Any]:
+    def get_data_source_detail_dict(self, *, session: Session) -> dict[str, Any]:
         if self.data_source_info:
             if self.data_source_type == "upload_file":
                 data_source_info_dict: dict[str, Any] = json.loads(self.data_source_info)
-                file_detail = db.session.scalar(
+                file_detail = session.scalar(
                     select(UploadFile).where(UploadFile.id == data_source_info_dict["upload_file_id"])
                 )
                 if file_detail:
@@ -624,29 +621,40 @@ class Document(Base):
 
     @property
     def dataset_process_rule(self):
+        return self.get_dataset_process_rule(session=db.session())
+
+    def get_dataset_process_rule(self, *, session: Session) -> "DatasetProcessRule | None":
         if self.dataset_process_rule_id:
-            return db.session.get(DatasetProcessRule, self.dataset_process_rule_id)
+            return session.get(DatasetProcessRule, self.dataset_process_rule_id)
         return None
 
-    @property
-    def dataset(self):
-        return db.session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
+    def get_dataset(self, *, session: Session) -> Dataset | None:
+        """Load the owning dataset with the caller-owned database session."""
+        return session.get(Dataset, self.dataset_id)
 
     @property
     def segment_count(self):
-        return (
-            db.session.scalar(select(func.count(DocumentSegment.id)).where(DocumentSegment.document_id == self.id)) or 0
-        )
+        return self.get_segment_count(session=db.session())
+
+    def get_segment_count(self, *, session: Session) -> int:
+        return session.scalar(select(func.count(DocumentSegment.id)).where(DocumentSegment.document_id == self.id)) or 0
 
     @property
     def hit_count(self):
-        return db.session.scalar(
-            select(func.coalesce(func.sum(DocumentSegment.hit_count), 0)).where(DocumentSegment.document_id == self.id)
+        return self.get_hit_count(session=db.session())
+
+    def get_hit_count(self, *, session: Session) -> int:
+        return (
+            session.scalar(
+                select(func.coalesce(func.sum(DocumentSegment.hit_count), 0)).where(
+                    DocumentSegment.document_id == self.id
+                )
+            )
+            or 0
         )
 
-    @property
-    def uploader(self):
-        user = db.session.scalar(select(Account).where(Account.id == self.created_by))
+    def get_uploader(self, *, session: Session) -> str | None:
+        user = session.scalar(select(Account).where(Account.id == self.created_by))
         return user.name if user else None
 
     @property
@@ -657,14 +665,17 @@ class Document(Base):
     def last_update_date(self):
         return self.updated_at
 
-    @property
-    def doc_metadata_details(self) -> list[DocMetadataDetailItem] | None:
+    def get_doc_metadata_details(self, *, session: Session) -> list[DocMetadataDetailItem] | None:
         if self.doc_metadata:
-            document_metadatas = db.session.scalars(
+            document_metadatas = session.scalars(
                 select(DatasetMetadata)
                 .join(DatasetMetadataBinding, DatasetMetadataBinding.metadata_id == DatasetMetadata.id)
                 .where(
-                    DatasetMetadataBinding.dataset_id == self.dataset_id, DatasetMetadataBinding.document_id == self.id
+                    DatasetMetadata.tenant_id == self.tenant_id,
+                    DatasetMetadata.dataset_id == self.dataset_id,
+                    DatasetMetadataBinding.tenant_id == self.tenant_id,
+                    DatasetMetadataBinding.dataset_id == self.dataset_id,
+                    DatasetMetadataBinding.document_id == self.id,
                 )
             ).all()
             metadata_list: list[DocMetadataDetailItem] = []
@@ -677,7 +688,7 @@ class Document(Base):
                 }
                 metadata_list.append(metadata_dict)
             # deal built-in fields
-            metadata_list.extend(self.get_built_in_fields())
+            metadata_list.extend(self.get_built_in_fields(session=session))
 
             return metadata_list
         return None
@@ -688,7 +699,7 @@ class Document(Base):
             return self.dataset_process_rule.to_dict()
         return None
 
-    def get_built_in_fields(self) -> list[DocMetadataDetailItem]:
+    def get_built_in_fields(self, *, session: Session) -> list[DocMetadataDetailItem]:
         built_in_fields: list[DocMetadataDetailItem] = []
         built_in_fields.append(
             {
@@ -703,7 +714,7 @@ class Document(Base):
                 "id": "built-in",
                 "name": BuiltInField.uploader,
                 "type": "string",
-                "value": self.uploader,
+                "value": self.get_uploader(session=session),
             }
         )
         built_in_fields.append(
@@ -847,17 +858,17 @@ class DocumentSegment(TypeBase):
     tenant_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     dataset_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     document_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
-    position: Mapped[int]
+    position: Mapped[int] = mapped_column(sa.Integer, nullable=False)
     content: Mapped[str] = mapped_column(LongText, nullable=False)
-    word_count: Mapped[int]
-    tokens: Mapped[int]
+    word_count: Mapped[int] = mapped_column(sa.Integer, nullable=False)
+    tokens: Mapped[int] = mapped_column(sa.Integer, nullable=False)
 
     created_by: Mapped[str] = mapped_column(StringUUID, nullable=False)
     # basic fields
     # indexing fields
     index_node_id: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
     index_node_hash: Mapped[str | None] = mapped_column(String(255), nullable=True, default=None)
-    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("true"), default=True)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.true(), default=True)
     answer: Mapped[str | None] = mapped_column(LongText, nullable=True, default=None)
     keywords: Mapped[Any] = mapped_column(sa.JSON, nullable=True, default=None)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
@@ -878,56 +889,40 @@ class DocumentSegment(TypeBase):
     stopped_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     hit_count: Mapped[int] = mapped_column(sa.Integer, nullable=False, default=0)
 
-    @property
-    def dataset(self):
-        return db.session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
+    def get_dataset(self, *, session: Session) -> Dataset | None:
+        """Load the owning dataset with the caller-owned database session."""
+        return session.get(Dataset, self.dataset_id)
 
-    @property
-    def document(self):
-        return db.session.scalar(select(Document).where(Document.id == self.document_id))
+    def get_document(self, *, session: Session) -> Document | None:
+        """Load the owning document with the caller-owned database session."""
+        return session.get(Document, self.document_id)
 
-    @property
-    def previous_segment(self):
-        return db.session.scalar(
+    def previous_segment(self, session: Session) -> "DocumentSegment | None":
+        return session.scalar(
             select(DocumentSegment).where(
                 DocumentSegment.document_id == self.document_id, DocumentSegment.position == self.position - 1
             )
         )
 
-    @property
-    def next_segment(self):
-        return db.session.scalar(
+    def next_segment(self, session: Session) -> "DocumentSegment | None":
+        return session.scalar(
             select(DocumentSegment).where(
                 DocumentSegment.document_id == self.document_id, DocumentSegment.position == self.position + 1
             )
         )
 
-    @property
-    def child_chunks(self):
-        if not self.document:
+    def get_child_chunks(self, *, session: Session, include_full_doc: bool = True) -> Sequence["ChildChunk"]:
+        """Load hierarchical child chunks with the caller-owned database session."""
+        document = session.get(Document, self.document_id)
+        if not document:
             return []
-        process_rule = self.document.dataset_process_rule
+        process_rule = document.get_dataset_process_rule(session=session)
         if process_rule and process_rule.mode == "hierarchical":
             rules_dict = process_rule.rules_dict
             if rules_dict:
                 rules = Rule.model_validate(rules_dict)
-                if rules.parent_mode and rules.parent_mode != ParentMode.FULL_DOC:
-                    child_chunks = db.session.scalars(
-                        select(ChildChunk).where(ChildChunk.segment_id == self.id).order_by(ChildChunk.position.asc())
-                    ).all()
-                    return child_chunks or []
-        return []
-
-    def get_child_chunks(self):
-        if not self.document:
-            return []
-        process_rule = self.document.dataset_process_rule
-        if process_rule and process_rule.mode == "hierarchical":
-            rules_dict = process_rule.rules_dict
-            if rules_dict:
-                rules = Rule.model_validate(rules_dict)
-                if rules.parent_mode:
-                    child_chunks = db.session.scalars(
+                if rules.parent_mode and (include_full_doc or rules.parent_mode != ParentMode.FULL_DOC):
+                    child_chunks = session.scalars(
                         select(ChildChunk).where(ChildChunk.segment_id == self.id).order_by(ChildChunk.position.asc())
                     ).all()
                     return child_chunks or []
@@ -1002,10 +997,10 @@ class DocumentSegment(TypeBase):
 
         return text
 
-    @property
-    def attachments(self) -> list[AttachmentItem]:
+    def get_attachments(self, *, session: Session) -> list[AttachmentItem]:
+        """Load attachment metadata with the caller-owned database session."""
         # Use JOIN to fetch attachments in a single query instead of two separate queries
-        attachments_with_bindings = db.session.execute(
+        attachments_with_bindings = session.execute(
             select(SegmentAttachmentBinding, UploadFile)
             .join(UploadFile, UploadFile.id == SegmentAttachmentBinding.attachment_id)
             .where(
@@ -1091,17 +1086,14 @@ class ChildChunk(TypeBase):
     )
     error: Mapped[str | None] = mapped_column(LongText, nullable=True, init=False)
 
-    @property
-    def dataset(self):
-        return db.session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
+    def dataset(self, session: Session) -> Dataset | None:
+        return session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
 
-    @property
-    def document(self):
-        return db.session.scalar(select(Document).where(Document.id == self.document_id))
+    def document(self, session: Session) -> Document | None:
+        return session.scalar(select(Document).where(Document.id == self.document_id))
 
-    @property
-    def segment(self):
-        return db.session.scalar(select(DocumentSegment).where(DocumentSegment.id == self.segment_id))
+    def segment(self, session: Session) -> DocumentSegment | None:
+        return session.scalar(select(DocumentSegment).where(DocumentSegment.id == self.segment_id))
 
 
 class AppDatasetJoin(TypeBase):
@@ -1125,9 +1117,8 @@ class AppDatasetJoin(TypeBase):
         DateTime, nullable=False, server_default=sa.func.current_timestamp(), init=False
     )
 
-    @property
-    def app(self):
-        return db.session.get(App, self.app_id)
+    def app(self, session: Session) -> App | None:
+        return session.get(App, self.app_id)
 
 
 class DatasetQuery(TypeBase):
@@ -1155,14 +1146,13 @@ class DatasetQuery(TypeBase):
         DateTime, nullable=False, server_default=sa.func.current_timestamp(), init=False
     )
 
-    @property
-    def queries(self) -> list[dict[str, Any]]:
+    def get_queries(self, *, session: Session) -> list[dict[str, Any]]:
         try:
             queries = json.loads(self.content)
             if isinstance(queries, list):
                 for query in queries:
                     if query["content_type"] == QueryType.IMAGE_QUERY:
-                        file_info = db.session.scalar(select(UploadFile).where(UploadFile.id == query["content"]))
+                        file_info = session.scalar(select(UploadFile).where(UploadFile.id == query["content"]))
                         if file_info:
                             query["file_info"] = {
                                 "id": file_info.id,
@@ -1208,8 +1198,7 @@ class DatasetKeywordTable(TypeBase):
         String(255), nullable=False, server_default=sa.text("'database'"), default="database"
     )
 
-    @property
-    def keyword_table_dict(self) -> dict[str, set[Any]] | None:
+    def get_keyword_table_dict(self, *, session: Session) -> dict[str, set[Any]] | None:
         class SetDecoder(json.JSONDecoder):
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 def object_hook(dct: Any) -> Any:
@@ -1218,7 +1207,7 @@ class DatasetKeywordTable(TypeBase):
                         items = cast(dict[str, Any], dct).items()
                         for keyword, node_idxs in items:
                             if isinstance(node_idxs, list):
-                                result[keyword] = set(cast(list[Any], node_idxs))
+                                result[keyword] = set(node_idxs)
                             else:
                                 result[keyword] = node_idxs
                         return result
@@ -1227,7 +1216,7 @@ class DatasetKeywordTable(TypeBase):
                 super().__init__(object_hook=object_hook, *args, **kwargs)
 
         # get dataset
-        dataset = db.session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
+        dataset = session.scalar(select(Dataset).where(Dataset.id == self.dataset_id))
         if not dataset:
             return None
         if self.data_source_type == "database":
@@ -1320,7 +1309,7 @@ class TidbAuthBinding(TypeBase):
     tenant_id: Mapped[str | None] = mapped_column(StringUUID, nullable=True)
     cluster_id: Mapped[str] = mapped_column(String(255), nullable=False)
     cluster_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"))
+    active: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false())
     status: Mapped[TidbAuthBindingStatus] = mapped_column(
         EnumText(TidbAuthBindingStatus, length=255), nullable=False, server_default=sa.text("'CREATING'")
     )
@@ -1371,9 +1360,7 @@ class DatasetPermission(TypeBase):
     dataset_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     account_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     tenant_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
-    has_permission: Mapped[bool] = mapped_column(
-        sa.Boolean, nullable=False, server_default=sa.text("true"), default=True
-    )
+    has_permission: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.true(), default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.current_timestamp(), init=False
     )
@@ -1427,12 +1414,15 @@ class ExternalKnowledgeApis(TypeBase):
             return None
 
     @property
-    def dataset_bindings(self) -> list[DatasetBindingItem]:
-        external_knowledge_bindings = db.session.scalars(
+    def dataset_bindings(self):
+        return self.get_dataset_bindings(session=db.session())
+
+    def get_dataset_bindings(self, *, session: Session) -> list[DatasetBindingItem]:
+        external_knowledge_bindings = session.scalars(
             select(ExternalKnowledgeBindings).where(ExternalKnowledgeBindings.external_knowledge_api_id == self.id)
         ).all()
         dataset_ids = [binding.dataset_id for binding in external_knowledge_bindings]
-        datasets = db.session.scalars(select(Dataset).where(Dataset.id.in_(dataset_ids))).all()
+        datasets = session.scalars(select(Dataset).where(Dataset.id.in_(dataset_ids))).all()
         dataset_bindings: list[DatasetBindingItem] = []
         for dataset in datasets:
             dataset_bindings.append({"id": dataset.id, "name": dataset.name})
@@ -1486,7 +1476,7 @@ class DatasetAutoDisableLog(TypeBase):
     tenant_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     dataset_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
     document_id: Mapped[str] = mapped_column(StringUUID, nullable=False)
-    notified: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"), default=False)
+    notified: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false(), default=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=sa.func.current_timestamp(), init=False
     )
@@ -1624,9 +1614,8 @@ class PipelineCustomizedTemplate(TypeBase):
         init=False,
     )
 
-    @property
-    def created_user_name(self):
-        account = db.session.scalar(select(Account).where(Account.id == self.created_by))
+    def created_user_name(self, session: Session) -> str:
+        account = session.scalar(select(Account).where(Account.id == self.created_by))
         if account:
             return account.name
         return ""
@@ -1643,10 +1632,8 @@ class Pipeline(TypeBase):
     name: Mapped[str] = mapped_column(sa.String(255), nullable=False)
     description: Mapped[str] = mapped_column(LongText, nullable=False, default=sa.text("''"))
     workflow_id: Mapped[str | None] = mapped_column(StringUUID, nullable=True, default=None)
-    is_public: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("false"), default=False)
-    is_published: Mapped[bool] = mapped_column(
-        sa.Boolean, nullable=False, server_default=sa.text("false"), default=False
-    )
+    is_public: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false(), default=False)
+    is_published: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.false(), default=False)
     created_by: Mapped[str | None] = mapped_column(StringUUID, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         sa.DateTime, nullable=False, server_default=func.current_timestamp(), init=False
@@ -1660,8 +1647,10 @@ class Pipeline(TypeBase):
         init=False,
     )
 
-    def retrieve_dataset(self, session: Session):
-        return session.scalar(select(Dataset).where(Dataset.pipeline_id == self.id))
+    def retrieve_dataset(self, session: Session | scoped_session):
+        return session.scalar(
+            select(Dataset).where(Dataset.pipeline_id == self.id, Dataset.tenant_id == self.tenant_id)
+        )
 
 
 class DocumentPipelineExecutionLog(TypeBase):
@@ -1768,7 +1757,7 @@ class DocumentSegmentSummary(TypeBase):
         default=SummaryStatus.GENERATING,
     )
     error: Mapped[str | None] = mapped_column(LongText, nullable=True, default=None)
-    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.text("true"), default=True)
+    enabled: Mapped[bool] = mapped_column(sa.Boolean, nullable=False, server_default=sa.true(), default=True)
     disabled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, default=None)
     disabled_by: Mapped[str | None] = mapped_column(StringUUID, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
@@ -1782,5 +1771,6 @@ class DocumentSegmentSummary(TypeBase):
         init=False,
     )
 
+    @override
     def __repr__(self):
         return f"<DocumentSegmentSummary id={self.id} chunk_id={self.chunk_id} status={self.status}>"

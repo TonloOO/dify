@@ -1,22 +1,25 @@
+import type { ComponentProps } from 'react'
 import { CheckboxGroup } from '@langgenius/dify-ui/checkbox-group'
 import { fireEvent, render, screen } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vite-plus/test'
 import MenuBar from '../menu-bar'
 
 vi.mock('../../display-toggle', () => ({
-  default: ({ isCollapsed, toggleCollapsed }: { isCollapsed: boolean, toggleCollapsed: () => void }) => (
+  default: ({
+    isCollapsed,
+    toggleCollapsed,
+  }: {
+    isCollapsed: boolean
+    toggleCollapsed: () => void
+  }) => (
     <button data-testid="display-toggle" onClick={toggleCollapsed}>
       {isCollapsed ? 'collapsed' : 'expanded'}
     </button>
   ),
 }))
 
-vi.mock('../../status-item', () => ({
-  default: ({ item }: { item: { name: string } }) => <div data-testid="status-item">{item.name}</div>,
-}))
-
 describe('MenuBar', () => {
-  const defaultProps = {
+  const defaultProps: ComponentProps<typeof MenuBar> = {
     hasSelectableSegments: true,
     isLoading: false,
     totalText: '10 Chunks',
@@ -25,7 +28,7 @@ describe('MenuBar', () => {
       { value: 0, name: 'Enabled' },
       { value: 1, name: 'Disabled' },
     ],
-    selectDefaultValue: 'all' as const,
+    selectDefaultValue: 'all',
     onChangeStatus: vi.fn(),
     inputValue: '',
     onInputChange: vi.fn(),
@@ -59,12 +62,14 @@ describe('MenuBar', () => {
   it('should not render select all checkbox when there are no selectable segments', () => {
     renderMenuBar({ hasSelectableSegments: false })
 
-    expect(screen.queryByRole('checkbox', { name: 'common.operation.selectAll' })).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('checkbox', { name: 'common.operation.selectAll' }),
+    ).not.toBeInTheDocument()
   })
 
   it('should call onInputChange when input changes', () => {
     renderMenuBar()
-    const input = screen.getByRole('textbox')
+    const input = screen.getByRole('searchbox', { name: 'common.operation.search' })
     fireEvent.change(input, { target: { value: 'test search' } })
     expect(defaultProps.onInputChange).toHaveBeenCalledWith('test search')
   })
@@ -87,22 +92,19 @@ describe('MenuBar', () => {
     expect(defaultProps.onInputChange).toHaveBeenCalledWith('')
   })
 
-  it('should render select with status items via renderOption', () => {
+  it('should render the selected status in the trigger', () => {
     renderMenuBar()
     expect(screen.getByText('All')).toBeInTheDocument()
   })
 
-  it('should call renderOption for each item when dropdown is opened', async () => {
+  it('should render status options when dropdown is opened', async () => {
     renderMenuBar()
 
     const selectButton = screen.getByRole('combobox')
     fireEvent.click(selectButton)
 
-    // After opening, renderOption is called for each item, rendering the mocked StatusItem
-    const statusItems = await screen.findAllByTestId('status-item')
-    expect(statusItems.length).toBe(3)
-    expect(statusItems[0]).toHaveTextContent('All')
-    expect(statusItems[1]).toHaveTextContent('Enabled')
-    expect(statusItems[2]).toHaveTextContent('Disabled')
+    expect(await screen.findByRole('option', { name: 'All' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Enabled' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Disabled' })).toBeInTheDocument()
   })
 })
