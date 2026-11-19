@@ -1,16 +1,33 @@
 import json
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from queue import Queue
+from threading import Thread
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
+from opentelemetry.proto.trace.v1.trace_pb2 import Span as WireSpan
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, scoped_session
 
 import models.model as model_module
 import services.message_service as service_module
 from core.app.entities.app_invoke_entities import InvokeFrom
+from core.ops import ops_trace_manager
+from core.ops.entities.trace_entity import FeedbackTraceInfo, MessageTraceInfo, WorkflowTraceInfo
+from core.ops.exceptions import InvalidTraceParentContextError, PendingTraceParentContextError
+from core.ops.ops_trace_manager import OpsTraceManager, TraceQueueManager
+from core.ops.unified_trace.message_parent import load_message_parent, save_message_parent
+from core.ops.unified_trace.otel import OTelTracingConfig, UnifiedOTelTrace
+from core.ops.unified_trace.parent_context import ProviderParentContext
+from core.ops.unified_trace.trace_builder import RepositoryWorkflowExecutionLoader
+from extensions.ext_storage import storage
+from extensions.storage.opendal_storage import OpenDALStorage
 from graphon.model_runtime.entities.model_entities import ModelType
 from models.account import Account, AccountStatus
 from models.agent import (
@@ -47,6 +64,7 @@ from services.errors.message import (
     SuggestedQuestionsAfterAnswerDisabledError,
 )
 from services.message_service import MessageService, attach_message_extra_contents
+from tasks.ops_trace_task import process_trace_tasks
 
 SQLITE_MODELS = (
     Conversation,
@@ -600,7 +618,164 @@ class TestMessageServiceGetMessage:
             )
 
 
+@pytest.fixture
+def otlp_receiver(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[OTelTracingConfig, list[WireSpan]]]:
+    received: list[WireSpan] = []
+
+    class Receiver(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            request = ExportTraceServiceRequest.FromString(self.rfile.read(int(self.headers["Content-Length"])))
+            for batch in request.resource_spans:
+                for scope in batch.scope_spans:
+                    received.extend(scope.spans)
+            self.send_response(200)
+            self.end_headers()
+
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+    with HTTPServer(("127.0.0.1", 0), Receiver) as receiver:
+        thread = Thread(target=receiver.serve_forever, daemon=True)
+        thread.start()
+        try:
+            yield OTelTracingConfig(endpoint=f"http://127.0.0.1:{receiver.server_port}/v1/traces"), received
+        finally:
+            receiver.shutdown()
+            thread.join()
+
+
 class TestMessageServiceFeedback:
+    def test_feedback_waits_for_answer_and_preserves_first_accepted_parent(
+        self,
+        factory: MessageServiceTestDataFactory,
+        sqlite_session: Session,
+        otlp_receiver: tuple[OTelTracingConfig, list[WireSpan]],
+    ) -> None:
+        app = factory.create_app()
+        message = factory.create_message()
+        _persist(sqlite_session, app, message)
+        updated_at = message.updated_at
+        config, received = otlp_receiver
+        submission = FeedbackTraceInfo(
+            submission_id=uuid4(),
+            app_id=app.id,
+            tenant_id=app.tenant_id,
+            message_id=message.id,
+            start_time=datetime.now(UTC),
+            rating="dislike",
+            content=None,
+            metadata={},
+        )
+        with pytest.raises(PendingTraceParentContextError):
+            UnifiedOTelTrace(config).trace(submission)
+        assert received == []
+
+        accepted = ProviderParentContext(
+            provider="otel",
+            scope="saved-destination",
+            trace_id="answer",
+            parent_id=message.id,
+            provider_context={"traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01"},
+        )
+        save_message_parent(app.tenant_id, app.id, accepted)
+        duplicate = accepted.model_copy(
+            update={"provider_context": {"traceparent": "00-" + "c" * 32 + "-" + "d" * 16 + "-01"}}
+        )
+        save_message_parent(app.tenant_id, app.id, duplicate)
+        assert load_message_parent(app.tenant_id, app.id, message.id, "otel", accepted.scope) == accepted
+        sqlite_session.refresh(message)
+        assert message.updated_at == updated_at
+        with pytest.raises(InvalidTraceParentContextError):
+            UnifiedOTelTrace(config).trace(submission)
+        assert received == []
+
+    @pytest.mark.parametrize("chatflow", [False, True], ids=["chat", "chatflow"])
+    def test_next_day_feedback_reaches_original_otlp_span(
+        self,
+        factory: MessageServiceTestDataFactory,
+        sqlite_session: Session,
+        monkeypatch: pytest.MonkeyPatch,
+        otlp_receiver: tuple[OTelTracingConfig, list[WireSpan]],
+        tmp_path: Path,
+        chatflow: bool,
+    ) -> None:
+        yesterday = datetime.now(UTC) - timedelta(days=1)
+        app = factory.create_app()
+        app.tracing = json.dumps({"enabled": True, "tracing_provider": "otel"})
+        message = factory.create_message(created_at=yesterday)
+        _persist(sqlite_session, app, message)
+        config, received = otlp_receiver
+        metadata = {"app_id": app.id, "tenant_id": app.tenant_id, "app_name": app.name}
+        if chatflow:
+            monkeypatch.setattr(RepositoryWorkflowExecutionLoader, "__call__", lambda _self, _info: [])
+            info = WorkflowTraceInfo.model_construct(
+                message_id=message.id,
+                start_time=yesterday,
+                end_time=yesterday,
+                metadata=metadata,
+                workflow_id="workflow",
+                workflow_run_id="run",
+                workflow_run_status="succeeded",
+                query=message.query,
+                workflow_run_inputs={},
+                workflow_run_outputs={"answer": message.answer},
+                total_tokens=3,
+            )
+        else:
+            info = MessageTraceInfo.model_construct(
+                message_id=message.id,
+                message_data=message,
+                start_time=yesterday,
+                end_time=yesterday,
+                message_tokens=1,
+                answer_tokens=2,
+                total_tokens=3,
+                metadata=metadata,
+            )
+        UnifiedOTelTrace(config).trace(info)
+        # Fresh worker and empty Redis, as after the short-lived parent context expires.
+        provider = UnifiedOTelTrace(config)
+        files: list[dict[str, str]] = []
+        monkeypatch.setattr(OpsTraceManager, "get_ops_trace_instance", lambda _app_id: provider)
+        monkeypatch.setattr(ops_trace_manager, "trace_manager_queue", Queue())
+        monkeypatch.setattr(TraceQueueManager, "start_timer", lambda _self: None)
+        monkeypatch.setattr(TraceQueueManager, "enqueue_persisted_trace", lambda _self, file: files.append(file))
+        monkeypatch.setattr(storage, "storage_runner", OpenDALStorage("fs", root=str(tmp_path)), raising=False)
+        for rating, content in [(FeedbackRating.LIKE, None), (FeedbackRating.DISLIKE, "请补充来源")]:
+            MessageService.create_feedback(
+                app_model=app,
+                message_id=message.id,
+                user=factory.create_end_user(),
+                rating=rating,
+                content=content,
+                session=sqlite_session,
+            )
+        TraceQueueManager(app_id=app.id).run()
+        assert len(files) == 2
+        for file in files:
+            path = ops_trace_manager.ops_trace_payload_path(file["app_id"], file["file_id"])
+            payload = storage.load(path)
+            process_trace_tasks.run(file)
+        storage.save(path, payload)
+        process_trace_tasks.run(files[-1])  # Same queued operation redelivered.
+
+        answer, _, like, dislike, replay = received
+        assert like.span_id != dislike.span_id == replay.span_id
+        for span in (like, dislike, replay):
+            assert span.name == "feedback"
+            assert span.trace_id == answer.trace_id
+            assert span.parent_span_id == answer.span_id
+            assert span.start_time_unix_nano - answer.end_time_unix_nano >= 86_400 * 10**9
+        attrs = [{attr.key: attr.value.string_value for attr in span.attributes} for span in (like, dislike)]
+        assert attrs[0]["dify.feedback.rating"] == "like"
+        assert "dify.feedback.content" not in attrs[0]
+        assert attrs[1]["dify.feedback.rating"] == "dislike"
+        assert attrs[1]["dify.feedback.content"] == "请补充来源"
+        assert attrs[1]["dify.message.id"] == message.id
+        with pytest.raises(InvalidTraceParentContextError):
+            load_message_parent(app.tenant_id, app.id, message.id, "otel", "different-destination")
+        for tenant_id, app_id in [("other-tenant", app.id), (app.tenant_id, "other-app")]:
+            with pytest.raises(PendingTraceParentContextError):
+                load_message_parent(tenant_id, app_id, message.id, "otel", "different-destination")
+
     def test_create_new_end_user_feedback(
         self,
         factory: MessageServiceTestDataFactory,

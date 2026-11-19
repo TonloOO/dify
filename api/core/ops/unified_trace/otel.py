@@ -4,11 +4,13 @@ import json
 import logging
 import re
 from collections.abc import Mapping
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any, override
 from urllib.parse import urlparse, urlunparse
 
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
+from opentelemetry.sdk.trace.id_generator import RandomIdGenerator
 from opentelemetry.util.types import AttributeValue
 from pydantic import field_validator
 from sqlalchemy.exc import SQLAlchemyError
@@ -16,10 +18,12 @@ from sqlalchemy.orm import Session
 
 from core.helper.encrypter import is_obfuscated_token
 from core.ops.entities.config_entity import BaseTracingConfig
-from core.ops.entities.trace_entity import BaseTraceInfo, WorkflowTraceInfo
+from core.ops.entities.trace_entity import BaseTraceInfo, FeedbackTraceInfo, MessageTraceInfo, WorkflowTraceInfo
 from core.ops.unified_trace.entities import CanonicalSpan, CanonicalSpanKind, CanonicalTrace
+from core.ops.unified_trace.message_parent import load_message_parent, save_message_parent
 from core.ops.unified_trace.otlp_adapter import OTLPUnifiedAdapter, OTLPUnifiedTrace
-from core.ops.unified_trace.parent_context import ParentResolution
+from core.ops.unified_trace.parent_context import ParentResolution, ProviderParentContext
+from core.ops.unified_trace.provider import ParentContextPublisher
 from core.ops.utils import validate_project_name, validate_url_with_path
 from extensions.ext_database import db
 from models.model import App
@@ -322,13 +326,24 @@ class OTelTracingConfig(BaseTracingConfig):
         return _load_resource_attributes(self.resource_attributes)
 
 
+_feedback_span_id: ContextVar[int | None] = ContextVar("feedback_span_id", default=None)
+
+
+class _OTelIdGenerator(RandomIdGenerator):
+    @override
+    def generate_span_id(self) -> int:
+        return _feedback_span_id.get() or super().generate_span_id()
+
+
 class UnifiedOTelAdapter(OTLPUnifiedAdapter[OTelTracingConfig]):
     """Export canonical traces to a user-provided OTLP/HTTP collector endpoint."""
 
     provider_name = "otel"
 
     def __init__(self, config: OTelTracingConfig) -> None:
-        super().__init__(config, endpoint=config.endpoint, scope_key=config.service_name)
+        super().__init__(
+            config, endpoint=config.endpoint, scope_key=config.service_name, id_generator=_OTelIdGenerator()
+        )
 
     @override
     def build_headers(self, config: OTelTracingConfig) -> dict[str, str]:
@@ -360,6 +375,10 @@ class UnifiedOTelAdapter(OTLPUnifiedAdapter[OTelTracingConfig]):
         parent: ParentResolution | None,
     ) -> dict[str, AttributeValue]:
         attributes = super().attributes(canonical_span, trace, parent)
+        if canonical_span.metadata.get("trace_entity_type") == "feedback":
+            for key in ("dify.message.id", "dify.feedback.rating", "dify.feedback.content"):
+                if key in canonical_span.metadata:
+                    attributes[key] = canonical_span.metadata[key]
         attributes.update(_gen_ai_attributes(canonical_span, trace))
         attributes.update(_tool_attributes(canonical_span))
         attributes.update(_time_attributes(canonical_span))
@@ -399,7 +418,44 @@ class UnifiedOTelTrace(OTLPUnifiedTrace):
     """Unified trace instance exporting to a custom OTel collector."""
 
     adapter_class = UnifiedOTelAdapter
+    supports_message_feedback = True
+
+    @override
+    def parent_publisher(self, trace_info: BaseTraceInfo) -> ParentContextPublisher:
+        publish = super().parent_publisher(trace_info)
+        if not isinstance(trace_info, (MessageTraceInfo, WorkflowTraceInfo)) or not trace_info.message_id:
+            return publish
+        app_id = trace_info.metadata.get("app_id")
+        tenant_id = trace_info.metadata.get("tenant_id")
+        if not app_id or not tenant_id:
+            return publish
+
+        def publish_answer(parent_id: str, context: ProviderParentContext) -> None:
+            if parent_id == trace_info.message_id:
+                save_message_parent(tenant_id, app_id, context)
+            publish(parent_id, context)
+
+        return publish_answer
+
+    @override
+    def resolve_required_parent(self, trace_info: BaseTraceInfo, parent_id: str) -> ParentResolution:
+        if isinstance(trace_info, FeedbackTraceInfo):
+            return ParentResolution.restored(
+                load_message_parent(
+                    trace_info.tenant_id, trace_info.app_id, parent_id, self._adapter.provider_name, self._adapter.scope
+                )
+            )
+        return super().resolve_required_parent(trace_info, parent_id)
 
     @override
     def trace(self, trace_info: BaseTraceInfo) -> None:
+        if isinstance(trace_info, FeedbackTraceInfo):
+            # UUID4's high 64 bits include the nonzero version nibble. Redeliveries
+            # of this submission must export the same OTLP span identity.
+            token = _feedback_span_id.set(trace_info.submission_id.int >> 64)
+            try:
+                super().trace(trace_info)
+            finally:
+                _feedback_span_id.reset(token)
+            return
         super().trace(_with_app_name(trace_info))

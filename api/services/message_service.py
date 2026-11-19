@@ -1,6 +1,8 @@
 import logging
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from typing import cast
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
@@ -261,6 +263,24 @@ class MessageService:
             cls._emit_feedback_telemetry(
                 app_model=app_model, message=message, user=user, rating=rating, content=content
             )
+            if app_model.tracing:
+                try:
+                    queue = TraceQueueManager(app_id=app_model.id)
+                    if queue.trace_instance and queue.trace_instance.supports_message_feedback:
+                        queue.add_trace_task(
+                            TraceTask(
+                                TraceTaskName.FEEDBACK_TRACE,
+                                message_id=message_id,
+                                app_id=app_model.id,
+                                tenant_id=app_model.tenant_id,
+                                submission_id=uuid4(),
+                                start_time=datetime.now(UTC),
+                                rating=rating.value,
+                                content=content,
+                            )
+                        )
+                except Exception:
+                    logger.exception("Failed to enqueue feedback trace for message %s", message_id)
 
         return feedback
 

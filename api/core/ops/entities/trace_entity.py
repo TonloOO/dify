@@ -1,9 +1,9 @@
 from collections.abc import Mapping
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Union
+from typing import Any, Literal, Self, Union
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
+from pydantic import UUID4, BaseModel, ConfigDict, field_serializer, field_validator, model_validator
 
 from core.helper.trace_id_helper import ParentTraceContext
 
@@ -119,6 +119,20 @@ class MessageTraceInfo(BaseTraceInfo):
     gen_ai_server_time_to_first_token: float | None = None
     llm_streaming_time_to_generate: float | None = None
     is_streaming_request: bool = False
+
+
+class FeedbackTraceInfo(BaseTraceInfo):
+    submission_id: UUID4
+    app_id: str
+    tenant_id: str
+    rating: Literal["like", "dislike"]
+    content: str | None
+
+    @model_validator(mode="after")
+    def require_answer_and_submission_time(self) -> Self:
+        if not self.message_id or self.start_time is None:
+            raise ValueError("A feedback trace requires the original message ID and submission time")
+        return self
 
 
 class ModerationTraceInfo(BaseTraceInfo):
@@ -250,6 +264,7 @@ class TaskData(BaseModel):
 trace_info_info_map = {
     "WorkflowTraceInfo": WorkflowTraceInfo,
     "MessageTraceInfo": MessageTraceInfo,
+    "FeedbackTraceInfo": FeedbackTraceInfo,
     "ModerationTraceInfo": ModerationTraceInfo,
     "SuggestedQuestionTraceInfo": SuggestedQuestionTraceInfo,
     "DatasetRetrievalTraceInfo": DatasetRetrievalTraceInfo,
@@ -282,6 +297,7 @@ class TraceTaskName(StrEnum):
     DRAFT_NODE_EXECUTION_TRACE = "draft_node_execution"
     WORKFLOW_TRACE = "workflow"
     MESSAGE_TRACE = "message"
+    FEEDBACK_TRACE = "feedback"
     MODERATION_TRACE = "moderation"
     SUGGESTED_QUESTION_TRACE = "suggested_question"
     DATASET_RETRIEVAL_TRACE = "dataset_retrieval"

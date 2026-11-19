@@ -63,6 +63,39 @@ def _make_payload() -> str:
     return json.dumps({"trace_info": {}, "trace_info_type": None})
 
 
+@pytest.mark.parametrize(("app_id", "supports_feedback"), [("app-id", False), ("other-app", True)])
+def test_pending_feedback_is_not_forwarded_after_a_provider_or_app_change(app_id: str, supports_feedback: bool):
+    trace_instance = MagicMock(supports_message_feedback=supports_feedback)
+    enterprise_trace_cls = MagicMock()
+    payload = json.dumps(
+        {
+            "trace_info_type": "FeedbackTraceInfo",
+            "trace_info": {
+                "submission_id": "30f13cbc-7784-43fa-8377-0a5a4bac8083",
+                "app_id": app_id,
+                "tenant_id": "tenant",
+                "message_id": "message",
+                "rating": "dislike",
+                "content": "comment",
+                "metadata": {},
+                "start_time": "2026-01-01T00:00:00Z",
+            },
+        }
+    )
+    with (
+        patch.dict(
+            sys.modules,
+            _install_trace_manager(trace_instance, enterprise_enabled=True, enterprise_trace_cls=enterprise_trace_cls),
+        ),
+        patch("tasks.ops_trace_task.storage.load", return_value=payload),
+        patch("tasks.ops_trace_task.storage.delete") as delete,
+    ):
+        _run_task({"app_id": "app-id", "file_id": "queued-feedback"})
+    enterprise_trace_cls.assert_not_called()
+    trace_instance.trace.assert_not_called()
+    delete.assert_called_once_with("ops_trace/app-id/queued-feedback.json")
+
+
 def _decode_saved_payload(payload: bytes | str) -> dict[str, object]:
     if isinstance(payload, bytes):
         payload = payload.decode("utf-8")
