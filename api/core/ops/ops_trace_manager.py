@@ -27,6 +27,7 @@ from core.ops.entities.trace_entity import (
     BaseTraceInfo,
     DatasetRetrievalTraceInfo,
     DraftNodeExecutionTrace,
+    FeedbackTraceInfo,
     GenerateNameTraceInfo,
     MessageTraceInfo,
     ModerationTraceInfo,
@@ -815,6 +816,9 @@ class TraceTask:
                 total_tokens_override=self.workflow_total_tokens,
             ),
             TraceTaskName.MESSAGE_TRACE: lambda: self.message_trace(message_id=self.message_id, **self.kwargs),
+            TraceTaskName.FEEDBACK_TRACE: lambda: FeedbackTraceInfo(
+                message_id=self.message_id, metadata={}, **self.kwargs
+            ),
             TraceTaskName.MODERATION_TRACE: lambda: self.moderation_trace(
                 message_id=self.message_id, timer=self.timer, **self.kwargs
             ),

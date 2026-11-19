@@ -59,6 +59,14 @@ class UnifiedTraceInstance(BaseTraceInstance):
         self._adapter = adapter
         self._coordinator = coordinator
 
+    def parent_publisher(self, trace_info: BaseTraceInfo) -> ParentContextPublisher:
+        return self._coordinator.publish
+
+    def resolve_required_parent(self, trace_info: BaseTraceInfo, parent_id: str) -> ParentResolution:
+        return self._coordinator.resolve_required(
+            parent_id, expected_provider=self._adapter.provider_name, expected_scope=self._adapter.scope
+        )
+
     @override
     def trace(self, trace_info: BaseTraceInfo) -> None:
         canonical_trace = self._builder.build(trace_info)
@@ -73,10 +81,6 @@ class UnifiedTraceInstance(BaseTraceInstance):
                 expected_scope=self._adapter.scope,
             )
         elif canonical_trace.required_parent_context_id is not None:
-            parent_resolution = self._coordinator.resolve_required(
-                canonical_trace.required_parent_context_id,
-                expected_provider=self._adapter.provider_name,
-                expected_scope=self._adapter.scope,
-            )
+            parent_resolution = self.resolve_required_parent(trace_info, canonical_trace.required_parent_context_id)
 
-        self._adapter.emit(canonical_trace, parent_resolution, self._coordinator.publish)
+        self._adapter.emit(canonical_trace, parent_resolution, self.parent_publisher(trace_info))

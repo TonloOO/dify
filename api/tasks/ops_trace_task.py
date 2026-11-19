@@ -24,7 +24,7 @@ from flask import current_app
 
 from configs import dify_config
 from core.ops.entities.config_entity import OPS_FILE_PATH, OPS_TRACE_FAILED_KEY
-from core.ops.entities.trace_entity import trace_info_info_map
+from core.ops.entities.trace_entity import FeedbackTraceInfo, trace_info_info_map
 from core.ops.exceptions import RetryableTraceDispatchError
 from core.rag.models.document import Document
 from extensions.ext_redis import redis_client
@@ -76,7 +76,13 @@ def process_trace_tasks(self, file_info):
 
         from extensions.ext_enterprise_telemetry import is_enabled as is_ee_telemetry_enabled
 
-        if is_ee_telemetry_enabled() and not enterprise_trace_dispatched:
+        feedback = isinstance(trace_info, FeedbackTraceInfo)
+        if feedback and (
+            trace_info.app_id != app_id or not trace_instance or not trace_instance.supports_message_feedback
+        ):
+            return
+
+        if not feedback and is_ee_telemetry_enabled() and not enterprise_trace_dispatched:
             from enterprise.telemetry.enterprise_trace import EnterpriseOtelTrace
 
             try:

@@ -14,6 +14,8 @@ class BaseTraceInstance(ABC):
     Base trace instance for ops trace services
     """
 
+    supports_message_feedback = False
+
     def __init__(self, trace_config: BaseTracingConfig):
         """
         Initializer for the trace instance.

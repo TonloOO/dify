@@ -24,6 +24,7 @@ from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExport
 from opentelemetry.sdk import trace as trace_sdk
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace.export import SpanExportResult
+from opentelemetry.sdk.trace.id_generator import IdGenerator
 from opentelemetry.trace import Span, Status, StatusCode, get_current_span, set_span_in_context
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
@@ -140,11 +141,13 @@ class OTLPUnifiedAdapter[ConfigT: BaseTracingConfig]:
 
     provider_name: str = "otlp"
 
-    def __init__(self, config: ConfigT, *, endpoint: str, scope_key: str = "") -> None:
+    def __init__(
+        self, config: ConfigT, *, endpoint: str, scope_key: str = "", id_generator: IdGenerator | None = None
+    ) -> None:
         self._config = config
         self._endpoint = endpoint
         self._exporter = self.build_exporter(config)
-        provider = trace_sdk.TracerProvider(resource=self.build_resource(config))
+        provider = trace_sdk.TracerProvider(resource=self.build_resource(config), id_generator=id_generator)
         self._tracer = cast(trace_sdk.Tracer, provider.get_tracer(INSTRUMENTATION_SCOPE_NAME))
         self._propagator = TraceContextTextMapPropagator()
         self._scope = destination_scope(self.provider_name, endpoint, scope_key)

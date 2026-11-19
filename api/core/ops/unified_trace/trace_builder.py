@@ -17,6 +17,7 @@ from core.helper.trace_id_helper import ParentTraceContext
 from core.ops.entities.trace_entity import (
     BaseTraceInfo,
     DatasetRetrievalTraceInfo,
+    FeedbackTraceInfo,
     GenerateNameTraceInfo,
     MessageTraceInfo,
     ModerationTraceInfo,
@@ -147,6 +148,23 @@ class CanonicalTraceBuilder:
                 return self._build_workflow(trace_info)
             case MessageTraceInfo():
                 return self._build_message(trace_info)
+            case FeedbackTraceInfo():
+                return self._single_trace(
+                    trace_info,
+                    name="feedback",
+                    kind=CanonicalSpanKind.CHAIN,
+                    span_id=str(trace_info.submission_id),
+                    parent_context_id=trace_info.message_id,
+                    metadata={
+                        "trace_entity_type": "feedback",
+                        "dify.message.id": trace_info.message_id,
+                        "dify.feedback.rating": trace_info.rating,
+                        **({"dify.feedback.content": trace_info.content} if trace_info.content is not None else {}),
+                    },
+                    inputs=None,
+                    outputs=None,
+                    end_time=trace_info.start_time,
+                )
             case ModerationTraceInfo():
                 return self._build_moderation(trace_info)
             case SuggestedQuestionTraceInfo():
@@ -312,6 +330,7 @@ class CanonicalTraceBuilder:
         parent_context_id: str | None = None,
         span_id: str | None = None,
         session_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> CanonicalTrace:
         operation_id = span_id or trace_info.operation_id or str(uuid4())
         trace_id = trace_info.resolved_trace_id or parent_context_id or operation_id
@@ -326,7 +345,7 @@ class CanonicalTraceBuilder:
             outputs=outputs,
             status=_status(error),
             error=error,
-            metadata=dict(trace_info.metadata),
+            metadata=dict(trace_info.metadata) if metadata is None else metadata,
         )
         return CanonicalTrace(
             trace_id=trace_id,

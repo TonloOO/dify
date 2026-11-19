@@ -1534,6 +1534,8 @@ class Message(Base):
         sa.Numeric(10, 7), nullable=False, server_default=sa.text("0.001")
     )
     parent_message_id: Mapped[str | None] = mapped_column(StringUUID, nullable=True)
+    # Accepted OTel answer context for feedback submitted after the tracing cache expires.
+    otel_parent_context: Mapped[str | None] = mapped_column(sa.Text, deferred=True)
     provider_response_latency: Mapped[float] = mapped_column(sa.Float, nullable=False, server_default=sa.text("0"))
     total_price: Mapped[Decimal | None] = mapped_column(sa.Numeric(10, 7))
     currency: Mapped[str] = mapped_column(String(255), nullable=False)
